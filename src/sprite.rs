@@ -49,22 +49,20 @@ pub enum LayerError {
     NameCollision,
 }
 
+/// A `Layer` is shared by every `Frame` of the `Sprite` and holds no pixels.
+/// The pixels live in the `Cel`s.
 #[derive(Debug, Clone)]
 pub struct Layer {
     name: String,
     is_visible: bool,
-    pixels: Vec<Index>,
 }
 
 impl Layer {
     /// Creates a new `Layer`.
-    pub fn new(name: &str, width: u32, height: u32) -> Self {
-        let total_pixels = (width * height) as usize;
-        let pixels = vec![Index(0); total_pixels];
+    pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
             is_visible: true,
-            pixels,
         }
     }
 
@@ -84,16 +82,33 @@ impl Layer {
     }
 }
 
+/// A `Cel` holds the pixels of ONE `Layer` in ONE `Frame`.
+#[derive(Debug, Clone)]
+pub struct Cel {
+    pixels: Vec<Index>,
+}
+
+impl Cel {
+    /// Creates a new transparent `Cel`.
+    fn new(width: u32, height: u32) -> Self {
+        let total_pixels = (width * height) as usize;
+        let pixels = vec![Index(0); total_pixels];
+        Self { pixels }
+    }
+}
+
+/// A `Frame` holds one `Cel` for every `Layer` of the `Sprite`.
+/// `cels[i]` always belongs to the `Sprite`'s `layers[i]`.
 #[derive(Debug)]
 pub struct Frame {
-    pub layers: Vec<Layer>,
+    cels: Vec<Cel>,
 }
 
 impl Frame {
-    /// Creates a new `Frame`.
-    fn new(width: u32, height: u32) -> Self {
+    /// Creates a new `Frame` with one transparent `Cel` per `Layer`.
+    fn new(width: u32, height: u32, layer_count: usize) -> Self {
         Self {
-            layers: vec![Layer::new("Background", width, height)],
+            cels: (0..layer_count).map(|_| Cel::new(width, height)).collect(),
         }
     }
 }
@@ -121,9 +136,10 @@ pub struct Sprite {
     width: u32,
     height: u32,
     palette: Vec<Color>,
+    layers: Vec<Layer>,
     frames: Vec<Frame>,
     current_frame: usize,
-    active_layer: String,
+    active_layer: usize,
 }
 
 impl Sprite {
@@ -133,45 +149,56 @@ impl Sprite {
             width,
             height,
             palette: vec![Color::transparent()],
-            active_layer: "Background".to_string(),
-            frames: vec![Frame::new(width, height)],
+            layers: vec![Layer::new("Background")],
+            frames: vec![Frame::new(width, height, 1)],
             current_frame: 0,
+            active_layer: 0,
         }
     }
 
-    /// Returns a reference to a `Layer` within the current frame.
-    ///
-    /// # errors
-    ///
-    /// Returns `LayerError::NotFound` if the `Layer` is not found in the current `Frame`.
-    pub fn get_layer(&self, name: &str) -> Result<&Layer, LayerError> {
-        let current_frame = &self.frames[self.current_frame];
-        if let Some(layer) = current_frame.layers.iter().find(|layer| layer.name == name) {
-            Ok(layer)
-        } else {
-            Err(LayerError::NotFound(name.to_string()))
-        }
-    }
-
-    /// Returns a mutable reference to a `Layer` within the current frame.
+    /// Returns the position of a `Layer` in the `Sprite`.
     ///
     /// # Errors
     ///
-    /// Returns `LayerError::NotFound` if the `Layer` is not found in the current `Frame`.
-    pub fn get_mut_layer(&mut self, name: &str) -> Result<&mut Layer, LayerError> {
-        let current_frame = &mut self.frames[self.current_frame];
-        if let Some(layer) = current_frame
-            .layers
-            .iter_mut()
-            .find(|layer| layer.name == name)
-        {
-            Ok(layer)
-        } else {
-            Err(LayerError::NotFound(name.to_string()))
-        }
+    /// Returns `LayerError::NotFound` if the `Layer` is not found in the `Sprite`.
+    fn get_layer_index(&self, name: &str) -> Result<usize, LayerError> {
+        self.layers
+            .iter()
+            .position(|layer| layer.name == name)
+            .ok_or_else(|| LayerError::NotFound(name.to_string()))
     }
 
-    /// Adds a `Layer` to the current frame.
+    /// Returns a reference to a `Layer`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LayerError::NotFound` if the `Layer` is not found in the `Sprite`.
+    pub fn get_layer(&self, name: &str) -> Result<&Layer, LayerError> {
+        let index = self.get_layer_index(name)?;
+        Ok(&self.layers[index])
+    }
+
+    /// Returns a mutable reference to a `Layer`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LayerError::NotFound` if the `Layer` is not found in the `Sprite`.
+    pub fn get_mut_layer(&mut self, name: &str) -> Result<&mut Layer, LayerError> {
+        let index = self.get_layer_index(name)?;
+        Ok(&mut self.layers[index])
+    }
+
+    /// Returns a reference to the `Cel` of a `Layer` within the current frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LayerError::NotFound` if the `Layer` is not found in the `Sprite`.
+    pub fn get_cel(&self, name: &str) -> Result<&Cel, LayerError> {
+        let index = self.get_layer_index(name)?;
+        Ok(&self.frames[self.current_frame].cels[index])
+    }
+
+    /// Adds a `Layer` to the `Sprite`, along with an empty `Cel` in every `Frame`.
     ///
     /// # Errors
     ///
@@ -181,9 +208,10 @@ impl Sprite {
         if self.get_layer(name).is_ok() {
             Err(LayerError::NameCollision)
         } else {
-            let layer = Layer::new(name, self.width, self.height);
-            let current_frame = &mut self.frames[self.current_frame];
-            current_frame.layers.push(layer);
+            self.layers.push(Layer::new(name));
+            for frame in &mut self.frames {
+                frame.cels.push(Cel::new(self.width, self.height));
+            }
             Ok(())
         }
     }
@@ -201,26 +229,18 @@ impl Sprite {
     ///
     /// # Errors
     ///
-    /// Returns `LayerError::NotFound` if the `Layer` is not found in the current `Frame`.
+    /// Returns `LayerError::NotFound` if the `Layer` is not found in the `Sprite`.
     pub fn set_active_layer(&mut self, name: &str) -> Result<(), LayerError> {
-        if self.active_layer == name {
-            Ok(())
-        } else if self.get_layer(name).is_ok() {
-            self.active_layer = name.to_string();
-            Ok(())
-        } else {
-            Err(LayerError::NotFound(name.to_string()))
-        }
+        self.active_layer = self.get_layer_index(name)?;
+        Ok(())
     }
 
     /// Sets the pixel at the provided row and column to the `Index` of the provided color.
     pub fn set_pixel(&mut self, row: u32, col: u32, palette_index: Index) {
         if row < self.height && col < self.width {
             let idx = self.get_index(row, col);
-            let active_name = self.active_layer.clone();
-            if let Ok(active_layer) = self.get_mut_layer(&active_name) {
-                active_layer.pixels[idx] = palette_index;
-            }
+            let active_cel = &mut self.frames[self.current_frame].cels[self.active_layer];
+            active_cel.pixels[idx] = palette_index;
         }
     }
 
@@ -246,12 +266,12 @@ impl Sprite {
     }
 
     /// Displays all the pixels of the selected `Layer` in a grid.
-    fn display_layer_data(&self, layer: &Layer) {
+    fn display_layer_data(&self, layer: &Layer, cel: &Cel) {
         println!("Layer: '{}' (Visible: {})", layer.name, layer.is_visible);
         for row in 0..self.height {
             for col in 0..self.width {
                 let idx = self.get_index(row, col);
-                let palette_index = layer.pixels[idx].value();
+                let palette_index = cel.pixels[idx].value();
                 print!("{palette_index} ");
             }
             println!();
@@ -263,40 +283,36 @@ impl Sprite {
     ///
     /// # Errors
     ///
-    /// Returns `LayerError::NotFound` if the `Layer` is not found in the current `Frame`.
+    /// Returns `LayerError::NotFound` if the `Layer` is not found in the `Sprite`.
     pub fn display_layer(&self, name: &str) -> Result<(), LayerError> {
-        let layer = self.get_layer(name)?;
-        self.display_layer_data(layer);
+        let index = self.get_layer_index(name)?;
+        let cel = &self.frames[self.current_frame].cels[index];
+        self.display_layer_data(&self.layers[index], cel);
         Ok(())
     }
 
     /// Displays all the pixels of all the `Layer`s in the current `Frame` as a sequence of grids.
     pub fn display_all_layers(&self) {
         let current_frame = &self.frames[self.current_frame];
-        for layer in &current_frame.layers {
-            self.display_layer_data(layer);
+        for (layer, cel) in self.layers.iter().zip(&current_frame.cels) {
+            self.display_layer_data(layer, cel);
         }
     }
 
-    /// Adds a `Frame` to the `Sprite`.
+    /// Adds a `Frame` to the `Sprite`, with an empty `Cel` for every `Layer`.
     pub fn add_frame(&mut self) {
-        let new_frame = Frame::new(self.width, self.height);
+        let new_frame = Frame::new(self.width, self.height, self.layers.len());
         self.frames.push(new_frame);
     }
 
-    /// Switches the active `Frame` index, updating the active `Layer` fallback if necessary.
+    /// Switches the active `Frame` index.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SpriteError::InvalidFrameIndex` if the `Frame` doesn't exist.
     pub fn set_current_frame(&mut self, index: usize) -> Result<(), SpriteError> {
         if index < self.frames.len() {
             self.current_frame = index;
-            let target_frame = &self.frames[index];
-            if !target_frame
-                .layers
-                .iter()
-                .any(|l| l.name == self.active_layer)
-                && let Some(first_layer) = target_frame.layers.first()
-            {
-                self.active_layer = first_layer.name.clone();
-            }
             Ok(())
         } else {
             Err(SpriteError::InvalidFrameIndex(index))
@@ -357,7 +373,7 @@ mod tests {
     /// and that visibility toggles properly modify the layer's state.
     #[test]
     fn test_layer_getters_and_setters() {
-        let mut layer = Layer::new("TestLayer", 4, 4);
+        let mut layer = Layer::new("TestLayer");
         assert_eq!(layer.get_name(), "TestLayer");
 
         layer.set_name("RenamedLayer");
@@ -435,18 +451,18 @@ mod tests {
         sprite.set_pixel(1, 1, red);
 
         {
-            let layer = sprite.get_layer("Background").unwrap();
+            let cel = sprite.get_cel("Background").unwrap();
             let idx = sprite.get_index(1, 1);
-            assert_eq!(layer.pixels[idx], red);
+            assert_eq!(cel.pixels[idx], red);
         }
 
         // Erase the pixel
         sprite.erase_pixel(1, 1);
 
         // Check it again
-        let layer = sprite.get_layer("Background").unwrap();
+        let cel = sprite.get_cel("Background").unwrap();
         let idx = sprite.get_index(1, 1);
-        assert_eq!(layer.pixels[idx], Index(0));
+        assert_eq!(cel.pixels[idx], Index(0));
 
         // Out of bounds should be silently ignored without crashing
         sprite.set_pixel(10, 10, red);
@@ -512,19 +528,40 @@ mod tests {
         sprite.add_frame();
         sprite.set_current_frame(1).unwrap();
 
-        // `Frame` 1's background layer should still be transparent (Index 0) at (0, 0)
+        // `Frame` 1's background cel should still be transparent (Index 0) at (0, 0)
         {
-            let layer = sprite.get_layer("Background").unwrap();
+            let cel = sprite.get_cel("Background").unwrap();
             let idx = sprite.get_index(0, 0);
-            assert_eq!(layer.pixels[idx], Index(0));
+            assert_eq!(cel.pixels[idx], Index(0));
         }
 
         // Switch back to `Frame` 0 and verify the red pixel is still there
         sprite.set_current_frame(0).unwrap();
         {
-            let layer = sprite.get_layer("Background").unwrap();
+            let cel = sprite.get_cel("Background").unwrap();
             let idx = sprite.get_index(0, 0);
-            assert_eq!(layer.pixels[idx], red);
+            assert_eq!(cel.pixels[idx], red);
         }
+    }
+
+    /// Verifies that a `Layer` added after several `Frame`s exist gets a `Cel`
+    /// in every `Frame`, and that a `Frame` added later gets a `Cel` for every `Layer`.
+    #[test]
+    fn test_layers_shared_across_frames() {
+        let mut sprite = Sprite::new(4, 4);
+        sprite.add_frame();
+        sprite.add_layer("Foreground").unwrap();
+        sprite.add_frame();
+
+        // Every frame has one cel per layer (Background + Foreground)
+        for frame in &sprite.frames {
+            assert_eq!(frame.cels.len(), sprite.layers.len());
+        }
+
+        // The new layer is reachable from every frame
+        sprite.set_current_frame(0).unwrap();
+        assert!(sprite.get_cel("Foreground").is_ok());
+        sprite.set_current_frame(2).unwrap();
+        assert!(sprite.get_cel("Foreground").is_ok());
     }
 }
